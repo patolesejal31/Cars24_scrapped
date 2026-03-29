@@ -31,10 +31,47 @@ def load_data():
     full_df = pd.concat(city_dataframes, ignore_index=True)
     full_df = full_df.fillna("N/A")
     
-    full_df['price_numeric'] = full_df['price'].astype(str).str.extract(r'(\d+\.?\d*)').astype(float)
-    full_df['price_numeric'] = full_df['price_numeric'].fillna(0)
+    # Optimize numeric price extraction
+    full_df['price_numeric'] = (
+        full_df['price']
+        .astype(str)
+        .str.extract(r'(\d+\.?\d*)')[0]
+        .astype(float)
+        .fillna(0)
+    )
     
+    # Precompute lowercase names (BIG performance boost)
+    full_df['name_lower'] = full_df['name'].astype(str).str.lower()
+
     return full_df
+
+
+# 🚀 Cached Filter Function (MAJOR FIX)
+@st.cache_data
+def filter_data(view_df, search_query, price_range, selected_fuels, selected_trans, sort_choice):
+    
+    search_query = search_query.lower()
+
+    mask = (
+        (view_df['name_lower'].str.contains(search_query, na=False)) &
+        (view_df['price_numeric'] >= price_range[0]) &
+        (view_df['price_numeric'] <= price_range[1])
+    )
+
+    if selected_fuels:
+        mask = mask & (view_df['fuel'].isin(selected_fuels))
+    if selected_trans:
+        mask = mask & (view_df['transmission'].isin(selected_trans))
+
+    filtered_df = view_df[mask].copy()
+
+    if sort_choice == "Low to High":
+        filtered_df = filtered_df.sort_values("price_numeric", ascending=True)
+    elif sort_choice == "High to Low":
+        filtered_df = filtered_df.sort_values("price_numeric", ascending=False)
+
+    return filtered_df
+
 
 def main():
     st.title("🏎️ CarVault Search Engine")
@@ -42,11 +79,10 @@ def main():
     st.markdown("---")
 
     # --- HARD RESET LOGIC ---
-    # This clears the internal memory of the app
     if st.sidebar.button("🔄 Reset All Filters", use_container_width=True):
-        st.cache_data.clear() # Clears the CSV cache
-        for key in st.session_state.keys():
-            del st.session_state[key] # Deletes all user selections
+        st.cache_data.clear()
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.rerun()
 
     df = load_data()
@@ -58,7 +94,7 @@ def main():
     # --- SIDEBAR FILTERS ---
     st.sidebar.header("🔍 Filter Panel")
 
-    # 1. City Selection (Keyed to session state for reset support)
+    # 1. City Selection
     available_cities = ["All Cities"] + sorted(df['city_label'].unique().tolist())
     selected_city = st.sidebar.selectbox("Location", available_cities, index=0, key="city_box")
     
@@ -67,7 +103,7 @@ def main():
     else:
         view_df = df[df['city_label'] == selected_city]
 
-    # 2. THE FILTER FORM
+    # 2. FILTER FORM
     with st.sidebar.form("filter_form", clear_on_submit=False):
         search_query = st.text_input("Search Model", placeholder="e.g. Swift, City...", key="s_query")
 
@@ -85,24 +121,15 @@ def main():
 
         submit_button = st.form_submit_button("Apply Filters", use_container_width=True)
 
-    # --- APPLY FILTERS ---
-    mask = (
-        (view_df['name'].str.contains(search_query, case=False)) &
-        (view_df['price_numeric'] >= price_range[0]) &
-        (view_df['price_numeric'] <= price_range[1])
+    # 🚀 APPLY FILTERS (NOW CACHED)
+    filtered_df = filter_data(
+        view_df,
+        search_query,
+        price_range,
+        selected_fuels,
+        selected_trans,
+        sort_choice
     )
-    
-    if selected_fuels:
-        mask = mask & (view_df['fuel'].isin(selected_fuels))
-    if selected_trans:
-        mask = mask & (view_df['transmission'].isin(selected_trans))
-    
-    filtered_df = view_df[mask].copy()
-
-    if sort_choice == "Low to High":
-        filtered_df = filtered_df.sort_values("price_numeric", ascending=True)
-    elif sort_choice == "High to Low":
-        filtered_df = filtered_df.sort_values("price_numeric", ascending=False)
 
     # --- DISPLAY AREA ---
     display_loc = "All Cities" if selected_city == "All Cities" else selected_city
@@ -112,7 +139,9 @@ def main():
         st.info("No cars match your current filters.")
     else:
         cols = st.columns(3)
-        for index, row in filtered_df.reset_index().iterrows():
+
+        # 🚀 LIMIT RENDERING (PREVENT UI FREEZE)
+        for index, row in filtered_df.head(30).reset_index().iterrows():
             with cols[index % 3]:
                 with st.container(border=True):
                     img_url = row.get('image', "N/A") 
@@ -129,7 +158,8 @@ def main():
                     c1.metric("Price", row['price'])
                     
                     loc_display = row.get('location', row['city_label'])
-                    if loc_display == "N/A": loc_display = row['city_label']
+                    if loc_display == "N/A":
+                        loc_display = row['city_label']
                     c2.markdown(f"📍 **Loc**\n\n{loc_display}")
                     
                     st.write(f"⚙️ {row['kilometer']} • {row['fuel']} • {row['transmission']}")
@@ -139,6 +169,7 @@ def main():
                         st.link_button("View Details ↗️", car_link, use_container_width=True)
                     else:
                         st.button("Link Unavailable", disabled=True, use_container_width=True)
+
 
 if __name__ == "__main__":
     main()
